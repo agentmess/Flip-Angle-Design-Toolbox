@@ -21,18 +21,16 @@ check_system_requirements();
 model = linear_exchange_model; 
 
 % define model parameters
-syms R1P R1L R1A kPL kPA kTRANS 
+syms R1P R1L kPL kTRANS 
 % define input parameters 
 syms t0 alpha_1 beta_1 A0 
-% define noise parameters 
-syms sigma_1 sigma_2 sigma_3
 % define initial state parameters
 syms P0 L0 
 
 % parameters of interest 
 % (those for which we wish to compute an estimate with minimal variance) 
 model.parameters_of_interest = [kPL kTRANS]; 
-model.parameters_of_interest_nominal_values = [0.05 0.04]; 
+model.parameters_of_interest_nominal_values = [0.02 0.04]; 
 
 % nuisance parameters
 % (those parameters that are unknown but whose estimates we only care about
@@ -42,21 +40,26 @@ model.nuisance_parameters_nominal_values = [ 2  5  1];
 
 % known parameters
 % (those whose values are assumed to be known constants) 
-model.known_parameters = [R1P R1L R1A t0 P0 L0]; 
-model.known_parameter_values = [1/35 1/30 1/25 0 0 0];  
+model.known_parameters = [R1P R1L t0 P0 L0]; 
+model.known_parameter_values = [1/35 1/30 0 0 0];  
 
-% define system matrices for differential eq. dx/dt = A*x(t) + B*u(t)
+% define system matrices for differential eq. 
+%   dx/dt = A*x(t) + B*u(t)
+%    y(t) = C*x(t) + D*u(t) 
 
-% two-site exchange model 
-model.A = [ -kPL-R1P  0   ;
-             kPL     -R1L];   
+% two-site exchange model with input feedthrough 
+model.A = [ -kPL-R1P  0  ;
+             kPL     -R1L];  
+         
 model.B = [kTRANS; 0]; 
 
-% three-site exhange model 
-% model.A = [ -kPL-kPA-R1P  0    0;
-%             kPL         -R1L  0;
-%             kPA          0   -R1A];   
-% model.B = [kTRANS; 0; 0]; 
+model.C = [1 0; 
+           0 1; 
+           0 0]; 
+       
+model.D = [0; 
+           0;
+           1]; 
 
 % define input function shape  
 model.u = @(t) A0 * (t - t0)^alpha_1 *exp(-(t - t0)/beta_1); % gamma-variate input  
@@ -76,8 +79,27 @@ model.N = 25;
 model.noise_type = 'Rician';
 % model.noise_type = 'None';
 
-model.noise_parameters = [0.01 0.01 0.1]; 
-% model.noise_parameters = [0.01 0.01 0.01 0.1]; 
+% choose noise magnitude  
+model.noise_parameters = [0.01 0.01 0.01]; % sigma^2 values for the noise 
+
+% choose flip angle input matrix 
+%   This allows you to set linear equality constraints on the flip angles
+%   for example setting: 
+%
+%      model.flip_angle_input_matrix = [1 0; 
+%                                       0 1; 
+%                                       1 0]; 
+%
+%   fixes the first and third flip angles to be equal one another. 
+%   Consider defaulting to
+% 
+%      model.flip_angle_input_matrix = eye(model.n) 
+% 
+%   if you wish to compute all flip angles separately. 
+model.flip_angle_input_matrix = [1 0; 
+                                 0 1]; 
+                             
+% model.flip_angle_input_matrix = eye(model.m + model.n)                              
 
 % choose design criterion 
 design_criterion = 'D-optimal'; 
@@ -90,37 +112,31 @@ design_criterion = 'D-optimal';
 model = discretize(model);  
 
 % compute sensitivities (doing this in advance makes things run faster)
-if ~model.sensitivities_computed ...
-        && (strcmp(design_criterion, 'D-optimal') ...
-            || strcmp(design_criterion, 'E-optimal') ...
-            || strcmp(design_criterion, 'A-optimal') ...
-            || strcmp(design_criterion, 'T-optimal') ...
-           )
-    model = sensitivities(model);  
-end
-
+model = sensitivities(model);  
 
 
 
 %% Design optimal flip angles
 
 % specify optimization start point and options for MATLAB optimization toolbox 
-initial_thetas_value = pi/2*ones(model.N, model.n + model.m);
-options = optimset('MaxFunEvals', 5000, 'MaxIter', 200, 'Display', 'iter');
+initial_q_value = pi/2*ones(model.n, model.N);
+options = optimset('MaxFunEvals', 10000, 'MaxIter', 100, 'Display', 'iter');
 
 % perform optimization 
-thetas = optimal_flip_angle_design(model, design_criterion, ...
-    initial_thetas_value, options); 
+[thetas, ~, q_opt] = optimal_flip_angle_design(model, design_criterion, ...
+    initial_q_value, options); 
 
 % plot optimal flip angles 
 figure 
-plot(thetas.*180./pi, 'x-') 
+plot(thetas'.*180./pi, 'x-') 
 title('Optimal flip angle scheme') 
 xlabel('acquisition number')
 ylabel('flip angle (degrees)')
-legend('Pyr', 'Lac', 'AIF')
-axis([1 model.N 0 100])
+legend('Pyr', 'Lac')
+% axis([1 model.N 0 100])
 
+thetas_opt = thetas(:, 1:2); 
+save('flip_angles.mat', 'thetas_opt')
 
 
 
@@ -131,7 +147,7 @@ axis([1 model.N 0 100])
 
 % plot simulated trajectories 
 figure
-plot(model.TR*(1:model.N), y', 'o-')
+plot(model.TR*(0:model.N-1), y', 'o-')
 title('Simulated data') 
 xlabel('time (s)')
 ylabel('measured magnetization (au)')
@@ -140,7 +156,7 @@ legend('Pyr', 'Lac', 'AIF')
 
 
 
-%% Estimate model parameters from data 
+%% Estimate model parameters from simulated data 
 
 % choose loss function for parameter fit 
 goodness_of_fit_criterion = 'maximum-likelihood'; 
@@ -151,5 +167,17 @@ goodness_of_fit_criterion = 'maximum-likelihood';
     = parameter_estimation(y, model, goodness_of_fit_criterion, thetas) 
 
 
+%% Plot results of estimate 
+model.parameters_of_interest_nominal_values = parameters_of_interest_est; 
+model.nuisance_parameters_nominal_values = nuisance_parameters_est; 
+model = discretize(model); 
+[~, y_fit] = generate_data(model, thetas); 
+
+figure
+plot(model.TR*(0:model.N-1), y', 'o-', (model.TR*(0:model.N-1)), y_fit')
+title('Simulated data') 
+xlabel('time (s)')
+ylabel('measured magnetization (au)')
+legend('Pyr', 'Lac', 'AIF')
 
 
